@@ -16,6 +16,10 @@ use matrix_sdk::{
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
+    /// Simulate a migration. Logs in and syncs, but does not perform any actual actions
+    #[arg(long = "dry-run")]
+    dryrun: bool,
+
     /// Username of the account to migrate from
     #[arg(long = "from", env = "FROM_USER")]
     from_user: OwnedUserId,
@@ -40,6 +44,14 @@ struct Args {
     #[arg(long, env = "TO_HOMESERVER")]
     to_homeserver: Option<OwnedServerName>,
 
+    /// Rooms to migrate
+    #[arg(long = "rooms")]
+    rooms: Vec<String>,
+
+    /// Rooms not to migrate
+    #[arg(long = "rooms-excluded")]
+    rooms_excluded: Vec<String>,
+
     /// Custom logging info
     #[arg(long, env = "RUST_LOG", default_value = "matrix_migrate=info")]
     log: String,
@@ -49,6 +61,17 @@ struct Args {
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     env_logger::Builder::new().parse_filters(&args.log).init();
+
+    if args.dryrun {
+        println!("Running in dry mode, not doing any actual changes");
+    }
+
+    if !args.rooms_excluded.is_empty() {
+        println!("Excluded rooms {}", args.rooms_excluded.join(", "));
+    }
+    if !args.rooms.is_empty() {
+        println!("Only doing actions for rooms {}", args.rooms.join(", "));
+    }
 
     let from_cb = Client::builder().user_agent("matrix-migrate/1");
     let from_c = if let Some(h) = args.from_homeserver {
@@ -98,7 +121,14 @@ async fn main() -> anyhow::Result<()> {
     let all_prev_rooms = from_c
         .joined_rooms()
         .into_iter()
-        .map(|r| r.room_id().to_owned())
+        .filter_map(|r|
+            if args.rooms_excluded.contains(&r.room_id().to_string()) {
+                None
+            } else if !args.rooms.is_empty() && !args.rooms.contains(&r.room_id().to_string()) {
+                None
+            } else {
+                Some(r.room_id().to_owned())
+            })
         .collect::<Vec<_>>();
 
     let all_new_rooms = to_c
@@ -144,12 +174,12 @@ async fn main() -> anyhow::Result<()> {
     let inviter_c = from_c.clone();
 
     let (_, not_yet_accepted, (remaining_invites, failed_invites)) = try_join!(
-        async move { ensure_power_levels(&ensure_c, ensure_user, &already_invited).await },
-        async move { accept_invites(&c_accept, &to_accept).await },
+        async move { ensure_power_levels(&ensure_c, ensure_user, &already_invited, args.dryrun).await },
+        async move { accept_invites(&c_accept, &to_accept, args.dryrun).await },
         async move {
             let to_invite = to_invite.clone();
-            let failed_invites = send_invites(&inviter_c, &to_invite, to_user.clone()).await?;
-            ensure_power_levels(&inviter_c, to_user.clone(), &to_invite).await?;
+            let failed_invites = send_invites(&inviter_c, &to_invite, to_user.clone(), args.dryrun).await?;
+            ensure_power_levels(&inviter_c, to_user.clone(), &to_invite, args.dryrun).await?;
             Ok((
                 to_invite
                     .into_iter()
@@ -167,10 +197,10 @@ async fn main() -> anyhow::Result<()> {
         .collect::<Vec<_>>();
 
     info!("First invitation set done.");
-    while !invites_awaiting.is_empty() {
+    while !invites_awaiting.is_empty() && !args.dryrun {
         info!("Still {} rooms to go. Syncing up", invites_awaiting.len());
         to_sync_stream.next().await.expect("Sync stream broke")?;
-        invites_awaiting = accept_invites(&to_c, &invites_awaiting.iter().collect()).await?;
+        invites_awaiting = accept_invites(&to_c, &invites_awaiting.iter().collect(), args.dryrun).await?;
     }
 
     if !failed_invites.is_empty() {
@@ -192,13 +222,16 @@ async fn ensure_power_levels(
     from_c: &Client,
     new_username: OwnedUserId,
     rooms: &Vec<&OwnedRoomId>,
+    dryrun: bool,
 ) -> anyhow::Result<()> {
     try_join_all(rooms.iter().enumerate().map(|(counter, room_id)| {
         let from_c = from_c.clone();
         let self_id = from_c.user_id().unwrap().to_owned();
         let user_id = new_username.clone();
         async move {
-            tokio::time::sleep(Duration::from_secs(counter.saturating_div(2) as u64)).await;
+            if !dryrun {
+                tokio::time::sleep(Duration::from_secs(counter.saturating_div(2) as u64)).await;
+            }
             let Some(joined) = from_c.get_joined_room(&room_id) else {
                 return anyhow::Ok(());
             };
@@ -222,6 +255,10 @@ async fn ensure_power_levels(
 
             info!("Trying to adjust power_level of {user_id} in {room_id} to {my_power_level}.");
 
+            if dryrun {
+                return anyhow::Ok(());
+            }
+
             if let Err(e) = joined
                 .update_power_levels(vec![(&user_id.clone(), my_power_level.try_into().unwrap())])
                 .await
@@ -239,6 +276,7 @@ async fn ensure_power_levels(
 async fn accept_invites(
     to_c: &Client,
     rooms: &Vec<&OwnedRoomId>,
+    dryrun: bool,
 ) -> anyhow::Result<Vec<OwnedRoomId>> {
     let mut pending = Vec::new();
     for room_id in rooms {
@@ -254,6 +292,9 @@ async fn accept_invites(
             invited.display_name().await?,
             invited.room_id()
         );
+        if dryrun {
+            continue;
+        }
         invited.accept_invitation().await?;
     }
 
@@ -264,12 +305,15 @@ async fn send_invites(
     from_c: &Client,
     rooms: &Vec<&OwnedRoomId>,
     user_id: OwnedUserId,
+    dryrun: bool,
 ) -> anyhow::Result<Vec<OwnedRoomId>> {
     Ok(join_all(rooms.iter().enumerate().map(|(counter, room_id)| {
         let from_c = from_c.clone();
         let user_id = user_id.clone();
         async move {
-            tokio::time::sleep(Duration::from_secs(counter.saturating_div(2) as u64)).await;
+            if !dryrun {
+                tokio::time::sleep(Duration::from_secs(counter.saturating_div(2) as u64)).await;
+            }
             let Some(joined) = from_c.get_joined_room(&room_id) else {
                         warn!("Can't invite user to {:}: not a member myself", room_id);
                         return Some(room_id.clone().to_owned());
@@ -278,9 +322,12 @@ async fn send_invites(
                 "Inviting to {room_id} ({})",
                 joined.display_name().await.unwrap()
             );
-            if let Err(e) = joined.invite_user_by_id(&user_id).await {
-                warn!("Inviting to {:} failed: {e}", room_id);
-                return Some(room_id.clone().to_owned());
+
+            if !dryrun {
+                if let Err(e) = joined.invite_user_by_id(&user_id).await {
+                    warn!("Inviting to {:} failed: {e}", room_id);
+                    return Some(room_id.clone().to_owned());
+                }
             }
             None
         }
