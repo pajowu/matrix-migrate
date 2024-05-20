@@ -171,7 +171,6 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let to_user = to_c.user_id().unwrap().to_owned();
-    let to_user_c = to_user.clone();
     let to_accept = invites_to_accept.iter().collect();
     let c_accept = to_c.clone();
     let ensure_user = to_user.clone();
@@ -216,6 +215,8 @@ async fn main() -> anyhow::Result<()> {
     }
 
     if args.leave_rooms {
+        to_sync_stream.next().await.expect("Sync stream broke")?;
+
         let all_new_rooms = to_c
             .joined_rooms()
             .into_iter()
@@ -227,7 +228,7 @@ async fn main() -> anyhow::Result<()> {
             .filter(|r| all_new_rooms.contains(r))
             .collect::<Vec<_>>();
 
-        leave_room(&from_c, to_user_c.clone(), to_remove, args.dryrun).await?;
+        leave_room(&from_c, &to_c, to_remove, args.dryrun).await?;
     } else {
         info!("Hint: Run again with the --leave-rooms flag to remove the old account from successfully migrated rooms");
     }
@@ -362,15 +363,16 @@ async fn send_invites(
 
 async fn leave_room(
     from_c: &Client,
-    new_user_id: OwnedUserId,
+    to_c: &Client,
     rooms: Vec<&OwnedRoomId>,
     dryrun: bool,
 ) -> anyhow::Result<()> {
-    let new_user = new_user_id.clone();
+    let new_user = to_c.user_id().unwrap().to_owned();
+
     for room_id in rooms {
         // fetch room
-        let Some(joined) = from_c.get_joined_room(&room_id) else {
-            warn!("old user isn't member of {room_id} anymore. Skipping leave.");
+        let Some(joined) = to_c.get_joined_room(&room_id) else {
+            warn!("new user isn't member of {room_id}. Skipping leave.");
             continue
         };
 
@@ -383,7 +385,7 @@ async fn leave_room(
 
         // check if new user is in room
         let Some(new_acc) = joined.get_member(&new_user).await? else {
-            warn!("old user isn't member of {room_id}. Skipping leave.");
+            warn!("new user isn't member of {room_id}. Skipping leave.");
             continue
         };
 
