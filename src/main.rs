@@ -403,7 +403,7 @@ async fn leave_room(
         if dryrun {
             continue;
         }
-        joined.leave().await?;
+        from_c.get_joined_room(&room_id).expect("Failed to fetch room").leave().await?;
     }
 
     Ok(())
