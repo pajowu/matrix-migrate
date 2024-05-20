@@ -44,13 +44,17 @@ struct Args {
     #[arg(long, env = "TO_HOMESERVER")]
     to_homeserver: Option<OwnedServerName>,
 
-    /// Rooms to migrate
+    /// Rooms to migrate (Default: all)
     #[arg(long = "rooms")]
     rooms: Vec<String>,
 
-    /// Rooms not to migrate
+    /// Rooms to skip
     #[arg(long = "rooms-excluded")]
     rooms_excluded: Vec<String>,
+
+    /// Remove old account from rooms when migration was successful
+    #[arg(long = "leave-rooms")]
+    leave_rooms: bool,
 
     /// Custom logging info
     #[arg(long, env = "RUST_LOG", default_value = "matrix_migrate=info")]
@@ -167,6 +171,7 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let to_user = to_c.user_id().unwrap().to_owned();
+    let to_user_c = to_user.clone();
     let to_accept = invites_to_accept.iter().collect();
     let c_accept = to_c.clone();
     let ensure_user = to_user.clone();
@@ -208,6 +213,23 @@ async fn main() -> anyhow::Result<()> {
             "Failed to invite to {:?}. See logs above for the reasons why",
             failed_invites
         );
+    }
+
+    if args.leave_rooms {
+        let all_new_rooms = to_c
+            .joined_rooms()
+            .into_iter()
+            .map(|r| r.room_id().to_owned())
+            .collect::<Vec<_>>();
+
+        let to_remove = all_prev_rooms
+            .iter()
+            .filter(|r| all_new_rooms.contains(r))
+            .collect::<Vec<_>>();
+
+        leave_room(&from_c, to_user_c.clone(), to_remove, args.dryrun).await?;
+    } else {
+        info!("Hint: Run again with the --leave-rooms flag to remove the old account from successfully migrated rooms");
     }
 
     to_c.logout().await?;
@@ -336,4 +358,51 @@ async fn send_invites(
     .into_iter()
     .filter_map(|e| e)
     .collect())
+}
+
+async fn leave_room(
+    from_c: &Client,
+    new_user_id: OwnedUserId,
+    rooms: Vec<&OwnedRoomId>,
+    dryrun: bool,
+) -> anyhow::Result<()> {
+    let new_user = new_user_id.clone();
+    for room_id in rooms {
+        // fetch room
+        let Some(joined) = from_c.get_joined_room(&room_id) else {
+            warn!("old user isn't member of {room_id} anymore. Skipping leave.");
+            continue
+        };
+
+        // check if old user is in room
+        let self_id = from_c.user_id().unwrap().to_owned();
+        let Some(me) = joined.get_member(&self_id).await? else {
+            warn!("old user isn't member of {room_id} anymore. Skipping leave.");
+            continue
+        };
+
+        // check if new user is in room
+        let Some(new_acc) = joined.get_member(&new_user).await? else {
+            warn!("old user isn't member of {room_id}. Skipping leave.");
+            continue
+        };
+
+        // check if new users power level is equal/greater of old user
+        if me.power_level() > new_acc.power_level() {
+            warn!("New user {new_user} doesn't have an equal/higher power level than {self_id} in {room_id}. Skipping leave.");
+            continue
+        }
+
+        info!(
+            "Leaving room {}({})",
+            joined.display_name().await?,
+            joined.room_id()
+        );
+        if dryrun {
+            continue;
+        }
+        joined.leave().await?;
+    }
+
+    Ok(())
 }
