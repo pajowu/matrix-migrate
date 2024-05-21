@@ -44,6 +44,10 @@ struct Args {
     #[arg(long, env = "TO_HOMESERVER")]
     to_homeserver: Option<OwnedServerName>,
 
+    /// Custom timeout for syncing
+    #[arg(long, env = "TIMEOUT", default_value = "60")]
+    timeout: u64,
+
     /// Rooms to migrate (Default: all)
     #[arg(long = "rooms")]
     rooms: Vec<String>,
@@ -115,7 +119,9 @@ async fn main() -> anyhow::Result<()> {
     info!("All logged in. Syncing...");
 
     let to_c_stream = to_c.clone();
-    let to_sync_stream = to_c_stream.sync_stream(SyncSettings::default()).await;
+    let to_sync_stream = to_c_stream.sync_stream(SyncSettings::default().
+            timeout(Duration::from_secs(args.timeout))
+        ).await;
     pin_mut!(to_sync_stream);
 
     try_join!(from_c.sync_once(SyncSettings::default()), async {
