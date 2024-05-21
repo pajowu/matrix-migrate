@@ -320,7 +320,7 @@ async fn accept_invites(
         };
         info!(
             "Accepting invite for {}({})",
-            invited.computed_display_name().await?,
+            invited.display_name().await?,
             invited.room_id()
         );
         if dryrun {
@@ -351,7 +351,7 @@ async fn send_invites(
                     };
             info!(
                 "Inviting to {room_id} ({})",
-                joined.computed_display_name().await.unwrap()
+                joined.display_name().await.unwrap()
             );
 
             if !dryrun {
@@ -405,7 +405,7 @@ async fn leave_room(
 
         info!(
             "Leaving room {}({})",
-            joined.computed_display_name().await?,
+            joined.display_name().await?,
             joined.room_id()
         );
         if dryrun {
@@ -418,7 +418,7 @@ async fn leave_room(
         if joined.name().is_none() {
             info!(
                 "Setting room {}({}) to direct message",
-                joined.computed_display_name().await?,
+                joined.display_name().await?,
                 joined.room_id()
             );
 
