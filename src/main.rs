@@ -410,8 +410,22 @@ async fn leave_room(
         );
         if dryrun {
             continue;
+        } else {
+            from_c.get_room(&room_id).expect("Failed to fetch room").leave().await?;
         }
-        from_c.get_joined_room(&room_id).expect("Failed to fetch room").leave().await?;
+
+        // TODO: Perform more checks to ensure setting is_direct is desired
+        if joined.name().is_none() {
+            info!(
+                "Setting room {}({}) to direct message",
+                joined.computed_display_name().await?,
+                joined.room_id()
+            );
+
+            if !dryrun {
+                joined.set_is_direct(true).await?;
+            }
+        }
     }
 
     Ok(())
