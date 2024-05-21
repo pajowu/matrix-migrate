@@ -6,9 +6,9 @@ It implements features such as:
 - `--dry-run` flag to display what changes would be made
 - Selection/Excluding of rooms using `--rooms` or `--rooms-excluded`
 - `--leave-rooms` for cleanup after migration
- - Removes the old user from the rooms
- - Restores the `is_direct` flag, so DMs are not displayed as chat rooms
-- Increased sync timeout and allows to override it using `--timeout`
+  - Removes the old user from the rooms
+  - Restores the `is_direct` flag, so DMs are not displayed as chat rooms
+- Increases sync timeout and allows to override it using `--timeout`
 
 ---
 
