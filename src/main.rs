@@ -90,6 +90,7 @@ async fn main() -> anyhow::Result<()> {
     info!("Logging in {:}", args.from_user);
 
     from_c
+        .matrix_auth()
         .login_username(args.from_user, &args.from_user_password)
         .send()
         .await?;
@@ -106,7 +107,8 @@ async fn main() -> anyhow::Result<()> {
 
     info!("Logging in {:}", args.to_user);
 
-    to_c.login_username(args.to_user, &args.to_user_password)
+    to_c.matrix_auth()
+        .login_username(args.to_user, &args.to_user_password)
         .send()
         .await?;
 
@@ -233,8 +235,8 @@ async fn main() -> anyhow::Result<()> {
         info!("Hint: Run again with the --leave-rooms flag to remove the old account from successfully migrated rooms");
     }
 
-    to_c.logout().await?;
-    from_c.logout().await?;
+    to_c.matrix_auth().logout().await?;
+    from_c.matrix_auth().logout().await?;
 
     info!("-- All done! -- ");
 
@@ -255,7 +257,7 @@ async fn ensure_power_levels(
             if !dryrun {
                 tokio::time::sleep(Duration::from_secs(counter.saturating_div(2) as u64)).await;
             }
-            let Some(joined) = from_c.get_joined_room(&room_id) else {
+            let Some(joined) = from_c.get_room(&room_id) else {
                 return anyhow::Ok(());
             };
 
@@ -303,8 +305,8 @@ async fn accept_invites(
 ) -> anyhow::Result<Vec<OwnedRoomId>> {
     let mut pending = Vec::new();
     for room_id in rooms {
-        let Some(invited) = to_c.get_invited_room(&room_id) else {
-            if to_c.get_joined_room(room_id).is_some() { // already existing, skipping
+        let Some(invited) = to_c.get_room(&room_id) else {
+            if to_c.get_room(room_id).is_some() { // already existing, skipping
                 continue
             }
             pending.push(room_id.clone().to_owned());
@@ -312,13 +314,13 @@ async fn accept_invites(
         };
         info!(
             "Accepting invite for {}({})",
-            invited.display_name().await?,
+            invited.computed_display_name().await?,
             invited.room_id()
         );
         if dryrun {
             continue;
         }
-        invited.accept_invitation().await?;
+        invited.join().await?;
     }
 
     Ok(pending)
@@ -337,13 +339,13 @@ async fn send_invites(
             if !dryrun {
                 tokio::time::sleep(Duration::from_secs(counter.saturating_div(2) as u64)).await;
             }
-            let Some(joined) = from_c.get_joined_room(&room_id) else {
+            let Some(joined) = from_c.get_room(&room_id) else {
                         warn!("Can't invite user to {:}: not a member myself", room_id);
                         return Some(room_id.clone().to_owned());
                     };
             info!(
                 "Inviting to {room_id} ({})",
-                joined.display_name().await.unwrap()
+                joined.computed_display_name().await.unwrap()
             );
 
             if !dryrun {
@@ -371,7 +373,7 @@ async fn leave_room(
 
     for room_id in rooms {
         // fetch room
-        let Some(joined) = to_c.get_joined_room(&room_id) else {
+        let Some(joined) = to_c.get_room(&room_id) else {
             warn!("new user isn't member of {room_id}. Skipping leave.");
             continue
         };
@@ -397,7 +399,7 @@ async fn leave_room(
 
         info!(
             "Leaving room {}({})",
-            joined.display_name().await?,
+            joined.computed_display_name().await?,
             joined.room_id()
         );
         if dryrun {
