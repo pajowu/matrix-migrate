@@ -1,4 +1,16 @@
-# matrix migrate
+# matrix migrate fork
+
+This is a fork of [acterglobal's matrix-migrate tool](https://github.com/acterglobal/matrix-migrate).
+
+It implements features such as:
+- `--dry-run` flag to display what changes would be made
+- Selection/Excluding of rooms using `--rooms` or `--rooms-excluded`
+- `--leave-rooms` for cleanup after migration
+ - Removes the old user from the rooms
+ - Restores the `is_direct` flag, so DMs are not displayed as chat rooms
+- Increased sync timeout and allows to override it using `--timeout`
+
+---
 
 CLI to migrate one matrix account to a new one. Similar to [the EMS migrator][ems tool] but:
 
