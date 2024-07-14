@@ -315,7 +315,7 @@ async fn accept_invites(
             if to_c.get_room(room_id).is_some() { // already existing, skipping
                 continue
             }
-            pending.push(room_id.clone().to_owned());
+            pending.push(room_id.to_owned().clone());
             continue
         };
         info!(
@@ -347,7 +347,7 @@ async fn send_invites(
             }
             let Some(joined) = from_c.get_room(&room_id) else {
                         warn!("Can't invite user to {:}: not a member myself", room_id);
-                        return Some(room_id.clone().to_owned());
+                        return Some(room_id.to_owned().clone());
                     };
             info!(
                 "Inviting to {room_id} ({})",
@@ -357,7 +357,7 @@ async fn send_invites(
             if !dryrun {
                 if let Err(e) = joined.invite_user_by_id(&user_id).await {
                     warn!("Inviting to {:} failed: {e}", room_id);
-                    return Some(room_id.clone().to_owned());
+                    return Some(room_id.to_owned().clone());
                 }
             }
             None
