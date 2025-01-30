@@ -21,28 +21,44 @@ struct Args {
     dryrun: bool,
 
     /// Username of the account to migrate from
-    #[arg(long = "from", env = "FROM_USER")]
-    from_user: OwnedUserId,
+    #[arg(long = "from", env = "FROM_USER", required_unless_present_all = ["from_homeserver", "from_sso"])]
+    from_user: Option<OwnedUserId>,
 
     /// Password of the account to migrate from
-    #[arg(long = "from-pw", env = "FROM_PASSWORD")]
-    from_user_password: String,
+    #[arg(
+        long = "from-pw",
+        env = "FROM_PASSWORD",
+        required_unless_present = "from_sso"
+    )]
+    from_user_password: Option<String>,
 
     /// Custom homeserver, if not defined discovery is used
     #[arg(long, env = "FROM_HOMESERVER")]
     from_homeserver: Option<OwnedServerName>,
 
+    /// Login via sso instead of username & password
+    #[arg(long = "from-sso", env = "FROM_SSO")]
+    from_sso: bool,
+
     /// Username of the given account to migrate to
-    #[arg(long = "to", env = "TO_USER")]
-    to_user: OwnedUserId,
+    #[arg(long = "to", env = "TO_USER", required_unless_present_all = ["to_homeserver", "to_sso"])]
+    to_user: Option<OwnedUserId>,
 
     /// Password of the account to migrate from
-    #[arg(long = "to-pw", env = "TO_PASSWORD")]
-    to_user_password: String,
+    #[arg(
+        long = "to-pw",
+        env = "TO_PASSWORD",
+        required_unless_present = "to_sso"
+    )]
+    to_user_password: Option<String>,
 
     /// Custom homeserver, if not defined discovery is used
     #[arg(long, env = "TO_HOMESERVER")]
     to_homeserver: Option<OwnedServerName>,
+
+    /// Login via sso instead of username & password
+    #[arg(long = "to-sso", env = "TO_SSO")]
+    to_sso: bool,
 
     /// Custom timeout for syncing
     #[arg(long, env = "TIMEOUT", default_value = "60")]
@@ -65,6 +81,41 @@ struct Args {
     log: String,
 }
 
+async fn get_client(
+    homeserver: Option<OwnedServerName>,
+    user: Option<&OwnedUserId>,
+    password: Option<&str>,
+    use_sso: bool,
+) -> anyhow::Result<Client> {
+    let cb = Client::builder().user_agent("matrix-migrate/1");
+    let c = if let Some(h) = homeserver {
+        cb.server_name(&h).build().await?
+    } else {
+        cb.server_name(user.unwrap().server_name()).build().await?
+    };
+
+    info!("Logging in {:?}", user);
+
+    let auth = c.matrix_auth();
+    if !auth.logged_in() {
+        match use_sso {
+            true => {
+                auth.login_sso(|sso_url| async move {
+                    println!("{}", sso_url);
+                    Ok(())
+                })
+                .send()
+                .await?
+            }
+            false => {
+                auth.login_username(user.unwrap(), password.unwrap())
+                    .send()
+                    .await?
+            }
+        };
+    }
+    Ok(c)
+}
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
@@ -81,47 +132,28 @@ async fn main() -> anyhow::Result<()> {
         println!("Only doing actions for rooms {}", args.rooms.join(", "));
     }
 
-    let from_cb = Client::builder().user_agent("matrix-migrate/1");
-    let from_c = if let Some(h) = args.from_homeserver {
-        from_cb.server_name(&h).build().await?
-    } else {
-        from_cb
-            .server_name(args.from_user.server_name())
-            .build()
-            .await?
-    };
+    let from_c = get_client(
+        args.from_homeserver,
+        args.from_user.as_ref(),
+        args.from_user_password.as_deref(),
+        args.from_sso,
+    )
+    .await?;
 
-    info!("Logging in {:}", args.from_user);
-
-    from_c
-        .matrix_auth()
-        .login_username(args.from_user, &args.from_user_password)
-        .send()
-        .await?;
-
-    let to_cb = Client::builder().user_agent("matrix-migrate/1");
-    let to_c = if let Some(h) = args.to_homeserver {
-        to_cb.server_name(&h).build().await?
-    } else {
-        to_cb
-            .server_name(args.to_user.server_name())
-            .build()
-            .await?
-    };
-
-    info!("Logging in {:}", args.to_user);
-
-    to_c.matrix_auth()
-        .login_username(args.to_user, &args.to_user_password)
-        .send()
-        .await?;
+    let to_c = get_client(
+        args.to_homeserver,
+        args.to_user.as_ref(),
+        args.to_user_password.as_deref(),
+        args.to_sso,
+    )
+    .await?;
 
     info!("All logged in. Syncing...");
 
     let to_c_stream = to_c.clone();
-    let to_sync_stream = to_c_stream.sync_stream(SyncSettings::default().
-            timeout(Duration::from_secs(args.timeout))
-        ).await;
+    let to_sync_stream = to_c_stream
+        .sync_stream(SyncSettings::default().timeout(Duration::from_secs(args.timeout)))
+        .await;
     pin_mut!(to_sync_stream);
 
     try_join!(from_c.sync_once(SyncSettings::default()), async {
@@ -133,14 +165,15 @@ async fn main() -> anyhow::Result<()> {
     let all_prev_rooms = from_c
         .joined_rooms()
         .into_iter()
-        .filter_map(|r|
+        .filter_map(|r| {
             if args.rooms_excluded.contains(&r.room_id().to_string()) {
                 None
             } else if !args.rooms.is_empty() && !args.rooms.contains(&r.room_id().to_string()) {
                 None
             } else {
                 Some(r.room_id().to_owned())
-            })
+            }
+        })
         .collect::<Vec<_>>();
 
     let all_new_rooms = to_c
@@ -190,7 +223,8 @@ async fn main() -> anyhow::Result<()> {
         async move { accept_invites(&c_accept, &to_accept, args.dryrun).await },
         async move {
             let to_invite = to_invite.clone();
-            let failed_invites = send_invites(&inviter_c, &to_invite, to_user.clone(), args.dryrun).await?;
+            let failed_invites =
+                send_invites(&inviter_c, &to_invite, to_user.clone(), args.dryrun).await?;
             ensure_power_levels(&inviter_c, to_user.clone(), &to_invite, args.dryrun).await?;
             Ok((
                 to_invite
@@ -212,7 +246,8 @@ async fn main() -> anyhow::Result<()> {
     while !invites_awaiting.is_empty() && !args.dryrun {
         info!("Still {} rooms to go. Syncing up", invites_awaiting.len());
         to_sync_stream.next().await.expect("Sync stream broke")?;
-        invites_awaiting = accept_invites(&to_c, &invites_awaiting.iter().collect(), args.dryrun).await?;
+        invites_awaiting =
+            accept_invites(&to_c, &invites_awaiting.iter().collect(), args.dryrun).await?;
     }
 
     if !failed_invites.is_empty() {
@@ -269,12 +304,12 @@ async fn ensure_power_levels(
 
             let Some(me) = joined.get_member(&self_id).await? else {
                 warn!("{self_id} isn't member of {room_id}. Skipping power_level ensuring.");
-                return anyhow::Ok(())
+                return anyhow::Ok(());
             };
 
             let Some(new_acc) = joined.get_member(&user_id).await? else {
                 warn!("{user_id} isn't member of {room_id}. Skipping power_level ensuring.");
-                return anyhow::Ok(())
+                return anyhow::Ok(());
             };
 
             let my_power_level = me.power_level();
@@ -312,11 +347,12 @@ async fn accept_invites(
     let mut pending = Vec::new();
     for room_id in rooms {
         let Some(invited) = to_c.get_room(&room_id) else {
-            if to_c.get_room(room_id).is_some() { // already existing, skipping
-                continue
+            if to_c.get_room(room_id).is_some() {
+                // already existing, skipping
+                continue;
             }
             pending.push(room_id.to_owned().clone());
-            continue
+            continue;
         };
         info!(
             "Accepting invite for {}({})",
@@ -346,9 +382,9 @@ async fn send_invites(
                 tokio::time::sleep(Duration::from_secs(counter.saturating_div(2) as u64)).await;
             }
             let Some(joined) = from_c.get_room(&room_id) else {
-                        warn!("Can't invite user to {:}: not a member myself", room_id);
-                        return Some(room_id.to_owned().clone());
-                    };
+                warn!("Can't invite user to {:}: not a member myself", room_id);
+                return Some(room_id.to_owned().clone());
+            };
             info!(
                 "Inviting to {room_id} ({})",
                 joined.display_name().await.unwrap()
@@ -381,26 +417,26 @@ async fn leave_room(
         // fetch room
         let Some(joined) = to_c.get_room(&room_id) else {
             warn!("new user isn't member of {room_id}. Skipping leave.");
-            continue
+            continue;
         };
 
         // check if old user is in room
         let self_id = from_c.user_id().unwrap().to_owned();
         let Some(me) = joined.get_member(&self_id).await? else {
             warn!("old user isn't member of {room_id} anymore. Skipping leave.");
-            continue
+            continue;
         };
 
         // check if new user is in room
         let Some(new_acc) = joined.get_member(&new_user).await? else {
             warn!("new user isn't member of {room_id}. Skipping leave.");
-            continue
+            continue;
         };
 
         // check if new users power level is equal/greater of old user
         if me.power_level() > new_acc.power_level() {
             warn!("New user {new_user} doesn't have an equal/higher power level than {self_id} in {room_id}. Skipping leave.");
-            continue
+            continue;
         }
 
         info!(
@@ -411,7 +447,11 @@ async fn leave_room(
         if dryrun {
             continue;
         } else {
-            from_c.get_room(&room_id).expect("Failed to fetch room").leave().await?;
+            from_c
+                .get_room(&room_id)
+                .expect("Failed to fetch room")
+                .leave()
+                .await?;
         }
 
         // TODO: Perform more checks to ensure setting is_direct is desired
